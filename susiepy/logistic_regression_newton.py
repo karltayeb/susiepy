@@ -1,6 +1,5 @@
 import jax.numpy as jnp
-import jaxopt
-from jax import value_and_grad, vmap, jit
+from jax import vmap, jit
 import jax
 
 def sigmoid(r):
@@ -59,7 +58,10 @@ def lr_newton_step_with_stepsize(state, x, y, offset, weights, penalty):
     state_new = make_state(coef, x, y, offset, weights, penalty, 1., state['maxiter'])
 
     ll_decreased = state_new['ll'] < state['ll']
-    converged = jnp.sum((state['coef'] - state_new['coef'])**2) < 1e-6
+    # converged = jnp.sum((state['coef'] - state_new['coef'])**2) < 1e-6
+    converged = jnp.abs(state['ll'] - state_new['ll']) < 1e-10
+    # converged = jnp.max(jnp.abs(state['grad'])) < 1e-7
+    # converged = jnp.max(jnp.obs(state['coef'] - state_new['coef'])) < 1e-4
 
     # using jax.lax.select to construct state instead of
     # if ll_decreased:
@@ -78,6 +80,9 @@ def lr_newton_step_with_stepsize(state, x, y, offset, weights, penalty):
     )
     return(state_final)
 
+def compute_std(H):
+    return jnp.sqrt(jnp.diag(jnp.linalg.inv(-H)))
+
 # driver function for fitting univaraite logistic regression
 @jit
 def fit_logistic_regression(x, y, offset, weights, penalty, maxiter):
@@ -85,16 +90,31 @@ def fit_logistic_regression(x, y, offset, weights, penalty, maxiter):
     cond_fun = lambda state: jax.lax.select(state['converged'] + (state['iter'] >= state['maxiter']), False, True)
     body_fun = lambda state: lr_newton_step_with_stepsize(state, x, y, offset, weights, penalty)
     state = jax.lax.while_loop(cond_fun, body_fun, init)
+    state['std'] = compute_std(state['hess'])
     return state
 
 # vectorize
 fit_logistic_regression_vmap = vmap(fit_logistic_regression, (1, None, None, None, None, None))
 fit_logistic_regression_vmap_jit = jit(fit_logistic_regression_vmap)
 
+# driver but takes coef initialization
+@jit
+def fit_logistic_regression2(coef, x, y, offset, weights, penalty, maxiter):
+    state = make_state(coef, x, y, offset, weights, penalty, 1.0, maxiter)
+    cond_fun = lambda state: jax.lax.select(state['converged'] + (state['iter'] >= state['maxiter']), False, True)
+    body_fun = lambda state: lr_newton_step_with_stepsize(state, x, y, offset, weights, penalty)
+    state = jax.lax.while_loop(cond_fun, body_fun, state)
+    return state
+
+# vectorize
+state_map = {'coef': 0, 'grad': 0, 'hess': 0, 'iter': 0, 'maxiter': 0, 'converged': 0, 'll': 0, 'stepsize': 0}
+fit_logistic_regression2_vmap = vmap(fit_logistic_regression2, (0, 1, None, None, None, None, None))
+fit_logistic_regression2_vmap_jit = jit(fit_logistic_regression2_vmap)
+
 def example():
     import numpy as np
     beta0 = -2
-    beta = 1
+    beta = 0.5
     n = 7500
     p = 4500
     x = np.random.normal(0, 1, n)
@@ -108,12 +128,40 @@ def example():
     offset = np.zeros_like(y)
     weights = np.ones_like(y)
     penalty = 0.
+
+    init = make_init_state(x, y, offset, weights, penalty, maxiter=10)
+    states = dict()
+    states[0] = init
+    for i in range(1, 20):
+        states[i] = lr_newton_step_with_stepsize(
+            states[i-1], x, y, offset, weights, penalty)
+        print(states[i]['ll'])
+    coef = states[19]['coef']
     
+    sklr = LogisticRegression(random_state=0, penalty=None).fit(x[:, None], y)
+    sklr_coef = np.hstack([sklr.intercept_, sklr.coef_.flatten()])
+    ll_grad(sklr_coef, x, y, offset, weights, penalty)
+    
+    log_likelihood(sklr_coef, x, y, offset, weights, penalty)
+    log_likelihood(coef, x, y, offset, weights, penalty)
     res1 = fit_logistic_regression(x, y, offset, weights, penalty, maxiter=10)
     
     X = np.random.normal(0, 1, n * p).reshape(n, -1)
     X[:, 0] = x
+
     # note: apparently you cant use key word arguments-- all argumnets are positivion after vmap 
     res2 = fit_logistic_regression_vmap(X[:, :10], y, offset, weights, penalty, 10)
     res3 = fit_logistic_regression_vmap_jit(X, y, offset, weights, penalty, 10)
 
+    idx = np.argmin(res3['grad'][:, 0])
+    x2 = X[:, idx]
+    
+    coef = res3['coef'][idx,]
+    sklr = LogisticRegression(random_state=0, penalty=None).fit(x2[:, None], y)
+    sklr_coef = np.hstack([sklr.intercept_, sklr.coef_.flatten()])
+    ll_grad(sklr_coef, x2, y, offset, weights, penalty)
+    compute_std(ll_hess(sklr_coef, x2, y, offset, weights, penalty))
+    log_likelihood(sklr_coef, x2, y, offset, weights, penalty)
+    ll_grad(coef, x2, y, offset, weights, penalty)
+    compute_std(ll_hess(coef, x2, y, offset, weights, penalty))
+    log_likelihood(coef, x2, y, offset, weights, penalty)
