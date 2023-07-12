@@ -1,10 +1,46 @@
 import numpy as np
-from scipy.stats import norm
-from scipy.special import logsumexp
+from jax.scipy.special import logsumexp
+from jax.scipy.stats import norm
+import jax.numpy as jnp
+import jax
 from susiepy.logistic_regression_newton import fit_logistic_regression, fit_logistic_regression_vmap_jit
 import time
+import inspect
+from jaxopt import LBFGS
 
-def fit_ser(X, y, offset = None, weights = None, prior_variance = 1.0, pi=None):
+@jax.jit
+def compute_lbf_variable(betahat, shat2, ll, ll0, prior_variance):
+    # compute corrected log Laplace apprximate BFs
+    log_abf = norm.logpdf(betahat, 0, jnp.sqrt(shat2 + prior_variance)) \
+        - norm.logpdf(betahat, 0, jnp.sqrt(shat2))
+    log_alr_mle = norm.logpdf(betahat, betahat, jnp.sqrt(shat2)) \
+        - norm.logpdf(betahat, 0, jnp.sqrt(shat2))
+    log_lr_mle = ll - ll0
+    log_labf = log_abf - log_alr_mle + log_lr_mle
+    return log_labf
+
+@jax.jit
+def compute_lbf_ser(prior_variance, pi, betahat, shat2, ll, ll0):
+    lbf = compute_lbf_variable(betahat, shat2, ll, ll0, prior_variance) 
+    return logsumexp(lbf + jnp.log(pi))
+
+def extract_args(fun, arguments):
+    params = inspect.signature(fun).parameters.keys()
+    subargs = {p: arguments[p] for p in params}
+    return subargs
+ 
+def exec(fun, arguments):
+    return fun(**extract_args(fun, arguments))
+
+@jax.jit
+def optimize_prior_variance(pi, betahat, shat2, ll, ll0):
+    fun = lambda ln_prior_variance: -1. * compute_lbf_ser(jnp.exp(ln_prior_variance), pi, betahat, shat2, ll, ll0)
+    fun_vg = jax.value_and_grad(fun)
+    solver = LBFGS(fun=fun_vg, value_and_grad = True)
+    opt = solver.run(np.array(0.))
+    return jnp.exp(opt.params)
+    
+def fit_ser(X, y, offset = None, weights = None, prior_variance = 1.0, pi=None, estimate_prior_variance=True):
     n, p = X.shape
     
     if offset is None:
@@ -27,8 +63,15 @@ def fit_ser(X, y, offset = None, weights = None, prior_variance = 1.0, pi=None):
     intercept = fit_mle['coef'][:, 0]
     betahat = fit_mle['coef'][:, 1]
     shat2 = fit_mle['std'][:, 1]**2
+    ll = fit_mle['ll']
+    
+    # optimize prior variance
+    
+    if estimate_prior_variance:
+        prior_variance = optimize_prior_variance(pi, betahat, shat2, ll, ll0)
     
     # compute corrected log Laplace apprximate BFs
+    log_labf = compute_lbf_variable(betahat, shat2, ll, ll0, prior_variance)
     log_abf = norm.logpdf(betahat, 0, np.sqrt(shat2 + prior_variance)) \
         - norm.logpdf(betahat, 0, np.sqrt(shat2))
     log_alr_mle = norm.logpdf(betahat, betahat, np.sqrt(shat2)) \
@@ -49,33 +92,45 @@ def fit_ser(X, y, offset = None, weights = None, prior_variance = 1.0, pi=None):
     toc = time.perf_counter() # start timer
 
     res = dict(
+        # posterior
         post_mean = np.array(post_mean), 
         post_variance = np.array(post_variance),
+        alpha = np.array(alpha),
+        lbf = np.array(log_labf),
+        lbf_ser = logsumexp(log_labf + np.log(pi)),
+        # mle
         betahat = np.array(betahat), 
         intercept = np.array(intercept), 
         shat2 = np.array(shat2),
-        alpha = np.array(alpha),
-        lbf = np.array(log_labf),
         glm_fit = fit_mle,
         ll = np.array(fit_mle['ll']),
         ll0 = np.array(ll0),
+        # prior
         prior_variance = prior_variance,
+        pi = pi,
+        #tracking
         elapsed_time = toc - tic
     )
+    
     # record predictions
     res['psi'] = X @ (res['post_mean'] * res['alpha'])
     return res
     
 
-def generalized_ibss(X, y, L, maxit=20, tol = 1e-6):
-    psi = np.zeros_like(y) # initialize offset E[Xb]
+def extract(res, key):
+    L = len(res['ser_fits'])
+    out = np.array([res['ser_fits'][l][key] for l in range(L)])
+    return out
+
+def generalized_ibss(X, y, L, estimate_prior_variance=True, maxit=20, tol = 1e-6):
     
     tic = time.perf_counter() # start timer
     
     # first iteration
+    psi = np.zeros_like(y) # initialize offset E[Xb]
     ser_fits = dict()
     for l in range(L):
-        ser_fits[l] = fit_ser(X, y, psi, prior_variance=1.0)
+        ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance)
         psi = psi + ser_fits[l]['psi']
     res = dict(ser_fits = ser_fits, iter = 0)
 
@@ -83,7 +138,7 @@ def generalized_ibss(X, y, L, maxit=20, tol = 1e-6):
         psi_old = psi
         for l in range(L):
             psi = psi - ser_fits[l]['psi']
-            ser_fits[l] = fit_ser(X, y, psi, prior_variance=1.0)
+            ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance)
             psi = psi + ser_fits[l]['psi']
         
         res = dict(ser_fits = ser_fits, iter = i)
@@ -94,13 +149,38 @@ def generalized_ibss(X, y, L, maxit=20, tol = 1e-6):
         if diff < tol:
             break
     toc = time.perf_counter() # stop timer
-    
-    alpha = np.array([res['ser_fits'][l]['alpha'] for l in range(L)])
-    mu = np.array([res['ser_fits'][l]['post_mean'] for l in range(L)])
+    keys = dict(
+        alpha = 'alpha',
+        mu = 'post_mean',
+        var = 'post_variance',
+        betahat = 'betahat',
+        intercept = 'intercept',
+        shat2 = 'shat2',
+        lbf = 'lbf',
+        lbf_ser = 'lbf_ser',
+        ll = 'll',
+        ll0 = 'll0',
+        prior_variance = 'prior_variance',
+        psi = 'psi')
+    summary = {k1: extract(res, k2) for k1, k2 in keys.items()}
+    res.update(summary)
+    res['elapsed_time'] = toc - tic
+    return(res)
 
-    res['alpha'] = alpha
-    res['mu'] = mu
-    res['elapsed_time'] = tic - toc
-    return res
+def test_fit_ser():
+    n = 1000
+    p = 100
+    X = np.random.normal(size=n*p).reshape(n, -1)
+    logit = -2 + X[:, 1]
+    y = np.random.binomial(1, 1/(1 + np.exp(-logit)), n)
+   
+    ser_fit1 = fit_ser(X, y, estimate_prior_variance=False) 
+    ser_fit2 = fit_ser(X, y)
+    
+    ser_fit2['lbf_ser'] - ser_fit1['lbf_ser']
+    
+    susie_fit = generalized_ibss(X, y, L=5, estimate_prior_variance=False)
+    susie_fit2 = generalized_ibss(X, y, L=5, estimate_prior_variance=True)
+    
 
         
