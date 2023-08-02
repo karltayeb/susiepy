@@ -4,12 +4,12 @@ from jax.scipy.stats import norm
 import jax.numpy as jnp
 import jax
 from jax import jit
-from susiepy.logistic_regression_newton import logistic_regression_functions
 import time
 import inspect
 from jaxopt import LBFGS
 from typing import Callable, Any
 from numpy.typing import NDArray
+from functools import partial
 
 def extract_args(fun: Callable, arguments: dict) -> dict:
     """Extract arguments of a function from a dictionary of arguments
@@ -73,10 +73,74 @@ def gibss_generator(regression_functions: dict):
     
     # unpack regression_function
     fit_null = regression_functions['fit_null']
-    fit_vmap = regression_functions['fit_vmap_jit']
-    fit_init_vmap = regression_functions['fit_from_init_vmap_jit'] 
+    fit_vmap = regression_functions['fit_vmap_jit_chunked']
+    #fit_init_vmap = regression_functions['fit_from_init_vmap_jit'] 
+   
+    # @partial(jax.jit, static_argnames=['estimate_prior_variance'])
+    def _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks):
+        # fit null model
+        ll0_fit = fit_null(y, offset, weights, 100)
+        ll0 = ll0_fit['ll']
+        null_intercept = ll0_fit['coef'][0]
+        
+        # fit univariate regression for each variable
+        penalty = 1e-5
+        maxiter = 50
+        mle = fit_vmap(X, y, offset, weights, penalty, maxiter, n_chunks)
+        
+        # unpack results
+        intercept = mle['coef'][:, 0]
+        betahat = mle['coef'][:, 1]
+        shat2 = mle['std'][:, 1]**2
+        ll = mle['ll']
+        
+        # optimize prior variance
+        if estimate_prior_variance:
+            prior_variance = optimize_prior_variance(pi, betahat, shat2, ll, ll0)
+        
+        # compute corrected log Laplace apprximate BFs
+        log_labf = compute_lbf_variable(betahat, shat2, ll, ll0, prior_variance)
+        log_abf = norm.logpdf(betahat, 0, np.sqrt(shat2 + prior_variance)) \
+            - norm.logpdf(betahat, 0, np.sqrt(shat2))
+        log_alr_mle = norm.logpdf(betahat, betahat, np.sqrt(shat2)) \
+            - norm.logpdf(betahat, 0, np.sqrt(shat2))
+        log_lr_mle = mle['ll'] - ll0
+        log_labf = log_abf - log_alr_mle + log_lr_mle
+        
+        # compute pips
+        log_alpha_unnormalized = log_labf + jnp.log(pi)
+        alpha = jnp.exp(log_alpha_unnormalized - logsumexp(log_alpha_unnormalized))
+        alpha = alpha / alpha.sum() # sometimes logsumexp isnt that accurate
+        
+        # asymptotic approximation of posterior distribution
+        post_precision = 1 / prior_variance + 1 / shat2
+        post_variance = 1 / post_precision
+        post_mean = (1 / shat2) * post_variance * betahat
+        
+        res = dict(
+            # posterior
+            post_mean = post_mean, 
+            post_variance = post_variance,
+            alpha = alpha,
+            lbf = log_labf,
+            lbf_ser = logsumexp(log_labf + jnp.log(pi)),
+            # mle
+            betahat = betahat, 
+            intercept = intercept, 
+            shat2 = shat2,
+            #glm_fit = fit_mle,
+            ll = mle['ll'],
+            ll0 = ll0,
+            # prior
+            prior_variance = prior_variance,
+            pi = pi
+        )
+        
+        # record predictions
+        res['psi'] = X @ (res['post_mean'] * res['alpha']) + jnp.inner(res['intercept'], res['alpha'])
+        return res
     
-    def fit_ser(X: NDArray, y: NDArray, offset: NDArray = None, weights: NDArray = None, prior_variance: float = 1.0, pi: NDArray = None, estimate_prior_variance: bool = True) -> dict:
+    def fit_ser(X: NDArray, y: NDArray, offset: NDArray = None, weights: NDArray = None, prior_variance: float = 1.0, pi: NDArray = None, estimate_prior_variance: bool = True, n_chunks: int = 1) -> dict:
         """Fit a single effect regression
         assumes regression function returns MLE and standard error
         uses an aymptotic approximation for the posterior effects, 
@@ -104,74 +168,12 @@ def gibss_generator(regression_functions: dict):
             pi = np.ones(p) / p
         
         tic = time.perf_counter() # start timer
-        
-        # fit null model
-        ll0_fit = fit_null(y, offset, weights, 100)
-        ll0 = ll0_fit['ll']
-        null_intercept = ll0_fit['coef'][0]
-        
-        # fit univariate regression for each variable
-        penalty = 1e-5
-        maxiter = 50
-        fit_mle = fit_vmap(X, y, offset, weights, penalty, maxiter)
-        
-        # unpack results
-        intercept = fit_mle['coef'][:, 0]
-        betahat = fit_mle['coef'][:, 1]
-        shat2 = fit_mle['std'][:, 1]**2
-        ll = fit_mle['ll']
-        
-        # optimize prior variance
-        if estimate_prior_variance:
-            prior_variance = optimize_prior_variance(pi, betahat, shat2, ll, ll0)
-        
-        # compute corrected log Laplace apprximate BFs
-        log_labf = compute_lbf_variable(betahat, shat2, ll, ll0, prior_variance)
-        log_abf = norm.logpdf(betahat, 0, np.sqrt(shat2 + prior_variance)) \
-            - norm.logpdf(betahat, 0, np.sqrt(shat2))
-        log_alr_mle = norm.logpdf(betahat, betahat, np.sqrt(shat2)) \
-            - norm.logpdf(betahat, 0, np.sqrt(shat2))
-        log_lr_mle = fit_mle['ll'] - ll0
-        log_labf = log_abf - log_alr_mle + log_lr_mle
-        
-        # compute pips
-        log_alpha_unnormalized = log_labf + np.log(pi)
-        alpha = np.exp(log_alpha_unnormalized - logsumexp(log_alpha_unnormalized))
-        alpha = alpha / alpha.sum() # sometimes logsumexp isnt that accurate
-        
-        # asymptotic approximation of posterior distribution
-        post_precision = 1 / prior_variance + 1 / shat2
-        post_variance = 1 / post_precision
-        post_mean = (1 / shat2) * post_variance * betahat
-        
+        res = _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks)
         toc = time.perf_counter() # start timer
-
-        res = dict(
-            # posterior
-            post_mean = np.array(post_mean), 
-            post_variance = np.array(post_variance),
-            alpha = np.array(alpha),
-            lbf = np.array(log_labf),
-            lbf_ser = logsumexp(log_labf + np.log(pi)),
-            # mle
-            betahat = np.array(betahat), 
-            intercept = np.array(intercept), 
-            shat2 = np.array(shat2),
-            #glm_fit = fit_mle,
-            ll = np.array(fit_mle['ll']),
-            ll0 = np.array(ll0),
-            # prior
-            prior_variance = prior_variance,
-            pi = pi,
-            #tracking
-            elapsed_time = toc - tic
-        )
-        
-        # record predictions
-        res['psi'] = X @ (res['post_mean'] * res['alpha']) + jnp.inner(res['intercept'], res['alpha'])
+        res['elapsed_time'] = toc - tic
         return res
         
-    def generalized_ibss(X: NDArray, y: NDArray, L: int, estimate_prior_variance: bool =True, maxit: int = 20, tol: float = 1e-6):
+    def generalized_ibss(X: NDArray, y: NDArray, L: int, estimate_prior_variance: bool =True, maxit: int = 20, tol: float = 1e-6, n_chunks: int = 1):
         """Fit generalized IBSS
         Apply IBSS, using `fit_ser` in the inner loop
 
@@ -189,7 +191,7 @@ def gibss_generator(regression_functions: dict):
         psi = np.zeros_like(y) # initialize offset E[Xb]
         ser_fits = dict()
         for l in range(L):
-            ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance)
+            ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks)
             psi = psi + ser_fits[l]['psi']
         res = dict(ser_fits = ser_fits, iter = 0)
 
@@ -231,22 +233,5 @@ def gibss_generator(regression_functions: dict):
     return fit_ser, generalized_ibss
 
 
-logistic_ser, logistic_gibss = gibss_generator(logistic_regression_functions)
-
-def test_fit_ser():
-    n = 7500 
-    p = 1000
-    X = np.random.normal(size=n*p).reshape(n, -1)
-    logit = -2 + 3* X[:, 1]
-    y = np.random.binomial(1, 1/(1 + np.exp(-logit)), n)
-   
-    ser_fit1 = logistic_ser(X, y, estimate_prior_variance=False) 
-    ser_fit2 = logistic_ser(X, y)
-    
-    ser_fit2['lbf_ser'] - ser_fit1['lbf_ser']
-    
-    susie_fit = logistic_gibss(X, y, L=5, estimate_prior_variance=False)
-    susie_fit2 = logistic_gibss(X, y, L=5, estimate_prior_variance=True)
-    
 
         

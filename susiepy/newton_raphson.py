@@ -6,7 +6,11 @@ import jax
 from jax import jit
 import jax.numpy as jnp
 
-
+def combine_chunks(chunks):
+    keys = chunks[0].keys()
+    shapes = {k: 0 if len(v.shape) > 1 else None for k, v in chunks[0].items()}
+    combined = {k: jnp.concatenate([chunk[k] for chunk in chunks], axis=shapes[k]) for k in keys}
+    return combined    
     
 def newton_raphson_generator(log_likelihood, coef_initializer):
     
@@ -97,6 +101,11 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
     fit_vmap = jax.vmap(fit_1d, (1, None, None, None, None, None))
     fit_vmap_jit = jax.jit(fit_vmap)
 
+    def fit_vmap_jit_chunked(X, y, offset, weights, penalty, maxiter, n_chunks):
+        Xs = jnp.array_split(X, n_chunks, axis=1)
+        res = combine_chunks([fit_vmap_jit(z, y, offset, weights, penalty, maxiter) for z in Xs])
+        return res
+    
     def fit_null(y, offset, weights, maxiter):
         x = jnp.zeros(y.size)
         penalty = 1e20 # large l2 penalty-- essentially fit intercept-only model
@@ -127,6 +136,7 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
         fit_1d = fit_1d,
         fit_null = fit_null,
         fit_vmap_jit = fit_vmap_jit,
+        fit_vmap_jit_chunked = fit_vmap_jit_chunked,
         fit_from_init_1d = fit_from_init_1d,
         fit_from_init_vmap_jit = fit_from_init_vmap_jit  
     )

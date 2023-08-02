@@ -1,7 +1,6 @@
 import jax.numpy as jnp
-from jax import vmap, jit
-import jax
 from susiepy.newton_raphson import newton_raphson_generator
+from susiepy.generalized_ibss import gibss_generator
 
 def sigmoid(r):
     return 1 / (1 + jnp.exp(-r))
@@ -17,6 +16,16 @@ def predict(beta0, beta, x, offset):
 
 
 def logistic_regression_log_likelihood(coef, x, y, offset, obs_weights, penalty):
+    """Compute log likelihood for logistic regression
+
+    Args:
+        coef (NDArray): 2 vector with intercept and effect
+        x (NDArray): n vector of covariate values
+        y (NDArray): n vector of responses
+        offset (NDArray): n vector of fixed offsets
+        obs_weights (NDArray): n vector of observation weights
+        penalty (float): l2 penalty for effect
+    """
     beta0 = coef[0]
     beta = coef[1]
     psi = predict(beta0, beta, x, offset)
@@ -44,16 +53,35 @@ def logistic_regression_coef_initializer(x, y, offset, weights, penalty):
 logistic_regression_functions = \
     newton_raphson_generator(logistic_regression_log_likelihood, logistic_regression_coef_initializer)
     
+logistic_ser, logistic_gibss = gibss_generator(logistic_regression_functions)
+
+def combine_sers(sers: list) -> dict:
+    keys = sers[0].keys()
+    res = {k: np.array([ser[k] for ser in sers]) for k in keys()}
+    return res
 
 def example():
     import numpy as np
+    from susiepy.logistic_susie import sigmoid, logistic_ser, logistic_gibss, logistic_regression_functions
     beta0 = -2
     beta = 0.5
-    n = 7500
-    p = 4500
+    n = 50000
+    p = 100
     x = np.random.normal(0, 1, n)
     logits = beta0 + beta * x
-    y = np.random.binomial(1, sigmoid(logits), size=logits.size)
+    y = np.random.binomial(1, sigmoid(logits), size=logits.size).astype(float)
+    X = np.random.normal(0, 1, n * p).reshape(n, -1)
+    X[:, 0] = x
+    
+    # %time a = logistic_regression_functions['fit_vmap_jit'](X, y, 0., 1., 0., 10.)
+    # %time b = logistic_regression_functions['fit_vmap_jit_chunked'](X, y, 0., 1., 0., 10., 10)
+    
+    # %time a = logistic_ser(X, y, n_chunks=1)
+    # %time b = logistic_ser(X, y, n_chunks=10)
+    
+    Xs = np.array_split(X, 10, axis=1)
+    res = [logistic_ser(z, y) for z in Xs]
+    
     
     beta0_init = logodds(jnp.mean(y)) 
     beta_init = 0.
@@ -84,13 +112,13 @@ def example():
     fit_logistic_regression = logistic_regression_functions['fit_1d']
     res1 = fit_logistic_regression(x, y, offset, weights, penalty, maxiter=10)
     
-    X = np.random.normal(0, 1, n * p).reshape(n, -1)
-    X[:, 0] = x
+
 
     # note: apparently you cant use key word arguments-- all argumnets are positivion after vmap 
     res2 = logistic_regression_functions['fit_vmap_jit'](X[:, :10], y, offset, weights, penalty, 10)
     res3 = logistic_regression_functions['fit_vmap_jit'](X, y, offset, weights, penalty, 10)
-
+    res4 = logistic_ser(X, y)
+    res5 = logistic_gibss(X, y, L=2, maxit=2)
     # use NR generator
     # idx = np.argmin(res3['grad'][:, 0])
     # x2 = X[:, idx]
@@ -104,3 +132,20 @@ def example():
     # ll_grad(coef, x2, y, offset, weights, penalty)
     # compute_std(ll_hess(coef, x2, y, offset, weights, penalty))
     # log_likelihood(coef, x2, y, offset, weights, penalty)
+
+
+def test_fit_ser():
+    n = 7500 
+    p = 1000
+    X = np.random.normal(size=n*p).reshape(n, -1)
+    logit = -2 + 3* X[:, 1]
+    y = np.random.binomial(1, 1/(1 + np.exp(-logit)), n)
+   
+    ser_fit1 = logistic_ser(X, y, estimate_prior_variance=False) 
+    ser_fit2 = logistic_ser(X, y)
+    
+    ser_fit2['lbf_ser'] - ser_fit1['lbf_ser']
+    
+    susie_fit = logistic_gibss(X, y, L=5, estimate_prior_variance=False)
+    susie_fit2 = logistic_gibss(X, y, L=5, estimate_prior_variance=True)
+    
