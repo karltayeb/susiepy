@@ -69,14 +69,11 @@ def optimize_prior_variance(pi, betahat, shat2, ll, ll0):
     opt = solver.run(np.array(0.))
     return jnp.exp(opt.params)
 
-def gibss_generator(regression_functions: dict):
-    
+def ser_generator(regression_functions: dict):
     # unpack regression_function
     fit_null = regression_functions['fit_null']
     fit_vmap = regression_functions['fit_vmap_jit_chunked']
-    #fit_init_vmap = regression_functions['fit_from_init_vmap_jit'] 
-   
-    # @partial(jax.jit, static_argnames=['estimate_prior_variance'])
+    
     def _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks):
         # fit null model
         ll0_fit = fit_null(y, offset, weights, 100)
@@ -172,6 +169,10 @@ def gibss_generator(regression_functions: dict):
         toc = time.perf_counter() # start timer
         res['elapsed_time'] = toc - tic
         return res
+
+    return fit_ser
+
+def gibss_generator(fit_ser: Callable):
         
     def generalized_ibss(X: NDArray, y: NDArray, L: int, estimate_prior_variance: bool =True, maxit: int = 20, tol: float = 1e-6, n_chunks: int = 1):
         """Fit generalized IBSS
@@ -199,7 +200,7 @@ def gibss_generator(regression_functions: dict):
             psi_old = psi
             for l in range(L):
                 psi = psi - ser_fits[l]['psi']
-                ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance)
+                ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks)
                 psi = psi + ser_fits[l]['psi']
             
             res = dict(ser_fits = ser_fits, iter = i)
@@ -230,7 +231,7 @@ def gibss_generator(regression_functions: dict):
         res['elapsed_time'] = toc - tic
         return(res)
 
-    return fit_ser, generalized_ibss
+    return generalized_ibss
 
 
 

@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 from susiepy.newton_raphson import newton_raphson_generator
-from susiepy.generalized_ibss import gibss_generator
+from susiepy.generalized_ibss import ser_generator, gibss_generator
 
 def sigmoid(r):
     return 1 / (1 + jnp.exp(-r))
@@ -53,12 +53,9 @@ def logistic_regression_coef_initializer(x, y, offset, weights, penalty):
 logistic_regression_functions = \
     newton_raphson_generator(logistic_regression_log_likelihood, logistic_regression_coef_initializer)
     
-logistic_ser, logistic_gibss = gibss_generator(logistic_regression_functions)
+logistic_ser = ser_generator(logistic_regression_functions)
+logistic_gibss = gibss_generator(logistic_ser)
 
-def combine_sers(sers: list) -> dict:
-    keys = sers[0].keys()
-    res = {k: np.array([ser[k] for ser in sers]) for k in keys()}
-    return res
 
 def example():
     import numpy as np
@@ -72,6 +69,10 @@ def example():
     y = np.random.binomial(1, sigmoid(logits), size=logits.size).astype(float)
     X = np.random.normal(0, 1, n * p).reshape(n, -1)
     X[:, 0] = x
+   
+    a = logistic_ser(X, y, n_chunks=10)
+    a2 = logistic_ser(X, y, n_chunks=1)
+    b = logistic_gibss(X, y, L=5, maxit=3, n_chunks=10, tol=1e-10)
     
     # %time a = logistic_regression_functions['fit_vmap_jit'](X, y, 0., 1., 0., 10.)
     # %time b = logistic_regression_functions['fit_vmap_jit_chunked'](X, y, 0., 1., 0., 10., 10)
