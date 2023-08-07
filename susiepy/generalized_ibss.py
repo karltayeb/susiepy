@@ -206,7 +206,7 @@ def gibss_generator(fit_ser: Callable):
             res = dict(ser_fits = ser_fits, iter = i)
             
             # check convergence of predictions
-            diff = np.sum((psi - psi_old)**2) 
+            diff = np.mean((psi - psi_old)**2)
             print(f'iter = {i}, diff = {diff}')
             if diff < tol:
                 break
