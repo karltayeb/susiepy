@@ -74,15 +74,13 @@ def ser_generator(regression_functions: dict):
     fit_null = regression_functions['fit_null']
     fit_vmap = regression_functions['fit_vmap_jit_chunked']
     
-    def _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks):
+    def _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks, penalty, maxiter):
         # fit null model
         ll0_fit = fit_null(y, offset, weights, 100)
         ll0 = ll0_fit['ll']
         null_intercept = ll0_fit['coef'][0]
         
         # fit univariate regression for each variable
-        penalty = 1e-5
-        maxiter = 50
         mle = fit_vmap(X, y, offset, weights, penalty, maxiter, n_chunks)
         
         # unpack results
@@ -137,7 +135,7 @@ def ser_generator(regression_functions: dict):
         res['psi'] = X @ (res['post_mean'] * res['alpha']) + jnp.inner(res['intercept'], res['alpha'])
         return res
     
-    def fit_ser(X: NDArray, y: NDArray, offset: NDArray = None, weights: NDArray = None, prior_variance: float = 1.0, pi: NDArray = None, estimate_prior_variance: bool = True, n_chunks: int = 1) -> dict:
+    def fit_ser(X: NDArray, y: NDArray, offset: NDArray = None, weights: NDArray = None, prior_variance: float = 1.0, pi: NDArray = None, estimate_prior_variance: bool = True, n_chunks: int = 1, penalty = 1e-5, maxiter=50) -> dict:
         """Fit a single effect regression
         assumes regression function returns MLE and standard error
         uses an aymptotic approximation for the posterior effects, 
@@ -165,7 +163,7 @@ def ser_generator(regression_functions: dict):
             pi = np.ones(p) / p
         
         tic = time.perf_counter() # start timer
-        res = _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks)
+        res = _fit_ser(X, y, offset, weights, prior_variance, estimate_prior_variance, pi, n_chunks, penalty, maxiter)
         toc = time.perf_counter() # start timer
         res['elapsed_time'] = toc - tic
         return res
@@ -174,7 +172,7 @@ def ser_generator(regression_functions: dict):
 
 def gibss_generator(fit_ser: Callable):
         
-    def generalized_ibss(X: NDArray, y: NDArray, L: int, estimate_prior_variance: bool =True, maxit: int = 20, tol: float = 1e-6, n_chunks: int = 1):
+    def generalized_ibss(X: NDArray, y: NDArray, L: int, estimate_prior_variance: bool =True, maxit: int = 20, tol: float = 1e-6, n_chunks: int = 1, penalty: float = 1e-5, maxit_inner: int = 50,):
         """Fit generalized IBSS
         Apply IBSS, using `fit_ser` in the inner loop
 
@@ -192,7 +190,7 @@ def gibss_generator(fit_ser: Callable):
         psi = np.zeros_like(y) # initialize offset E[Xb]
         ser_fits = dict()
         for l in range(L):
-            ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks)
+            ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks, penalty = penalty, maxiter = maxit_inner)
             psi = psi + ser_fits[l]['psi']
         res = dict(ser_fits = ser_fits, iter = 0)
 
@@ -200,7 +198,7 @@ def gibss_generator(fit_ser: Callable):
             psi_old = psi
             for l in range(L):
                 psi = psi - ser_fits[l]['psi']
-                ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks)
+                ser_fits[l] = fit_ser(X, y, psi, estimate_prior_variance=estimate_prior_variance, n_chunks = n_chunks, penalty = penalty)
                 psi = psi + ser_fits[l]['psi']
             
             res = dict(ser_fits = ser_fits, iter = i)
