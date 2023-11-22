@@ -73,7 +73,8 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
             stepsize = jax.lax.select(ll_decreased, state['stepsize'] / 2., 1.),
             converged = converged,
             iter = state['iter'] + 1,
-            maxiter = state['maxiter']
+            maxiter = state['maxiter'],
+            penalty = state['penalty']
         )
         return(state_final)
 
