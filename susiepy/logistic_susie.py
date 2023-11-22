@@ -31,7 +31,7 @@ def logistic_regression_log_likelihood(coef, x, y, offset, obs_weights, penalty)
     psi = predict(beta0, beta, x, offset)
     psi = jnp.clip(psi, -100, 100) # bound the log-odds
     ll = y * psi - jnp.log1p(jnp.exp(psi))
-    return(jnp.sum(ll * obs_weights) + penalty * beta**2) # weighted log likelihood, l2 penalty
+    return(jnp.sum(ll * obs_weights) - penalty * beta**2) # weighted log likelihood, l2 penalty
 
 
 def logistic_regression_coef_initializer(x, y, offset, weights, penalty):
