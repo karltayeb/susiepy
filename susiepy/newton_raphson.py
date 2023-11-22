@@ -24,7 +24,7 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
         g = ll_grad(coef, x, y, offset, weights, penalty)
         H = ll_hess(coef, x, y, offset, weights, penalty)
         ll = log_likelihood(coef, x, y, offset, weights, penalty)
-        state = dict(coef=coef, grad=g, hess=H, ll=ll, stepsize=stepsize, converged=False, iter=0, maxiter=maxiter)
+        state = dict(coef=coef, grad=g, hess=H, ll=ll, stepsize=stepsize, converged=False, iter=0, maxiter=maxiter, penalty=penalty)
         return(state)
 
     # state of optimization at initialization
