@@ -1,1 +1,4 @@
 susiepy.egg-info/*
+notebooks/*.html
+notebooks/*_files/
+.vscode/
