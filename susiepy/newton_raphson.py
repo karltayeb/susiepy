@@ -62,20 +62,16 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
         ll_decreased = state_new['ll'] < state['ll']
         converged = jnp.abs(state['ll'] - state_new['ll']) < 1e-10
 
-        # construct new state
-        # select proposed state if log likelihood did not decrease
-        # select old state if log likelihood decreases
-        state_final = dict(
-            coef = jax.lax.select(ll_decreased, state['coef'], state_new['coef']),
-            grad = jax.lax.select(ll_decreased, state['grad'], state_new['grad']),
-            hess = jax.lax.select(ll_decreased, state['hess'], state_new['hess']),
-            ll = jax.lax.select(ll_decreased, state['ll'], state_new['ll']),
-            stepsize = jax.lax.select(ll_decreased, state['stepsize'] / 2., 1.),
-            converged = converged,
-            iter = state['iter'] + 1,
-            maxiter = state['maxiter'],
-            penalty = state['penalty']
-        )
+        # use new state if ll decreased
+        state_final = {
+            k: jax.lax.select(ll_decreased, state[k], state_new[k])
+            for k in state.keys()
+        }
+
+        # otherwise, decrease stepsize
+        state_final['stepsize'] = jax.lax.select(ll_decreased, state['stepsize'] / 2., 1.)
+        state_final['converged'] = converged
+        state_final['iter'] = state['iter'] + 1
         return(state_final)
 
     def compute_std(H):
