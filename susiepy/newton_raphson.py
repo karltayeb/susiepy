@@ -13,7 +13,6 @@ def combine_chunks(chunks):
     return combined    
     
 def newton_raphson_generator(log_likelihood, coef_initializer):
-    
     # compute gradient and hessian
     ll_grad = jax.jit(jax.grad(log_likelihood))
     ll_hess = jax.jit(jax.hessian(log_likelihood))
@@ -74,24 +73,12 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
         state_final['iter'] = state['iter'] + 1
         return(state_final)
 
-    def compute_std(H):
-        """Compute standard error of coefficients
-
-        Args:
-            H (Array): Hessian matrix
-
-        Returns:
-            Array: vector of standard errors for coefficients
-        """
-        return jnp.sqrt(jnp.diag(jnp.linalg.inv(-H)))
-
     @jit
     def fit_1d(x, y, offset, weights, penalty, maxiter):
         init = make_init_state(x, y, offset, weights, penalty, maxiter)
         cond_fun = lambda state: jax.lax.select(state['converged'] + (state['iter'] >= state['maxiter']), False, True)
         body_fun = lambda state: lr_newton_step_with_stepsize(state, x, y, offset, weights, penalty)
         state = jax.lax.while_loop(cond_fun, body_fun, init)
-        state['std'] = compute_std(state['hess'])
         return state
 
     # vectorize
@@ -129,7 +116,6 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
         make_init_state = make_init_state,
         make_init_state_vmap_jit = make_init_state_vmap_jit,
         lr_newton_step_with_stepsize = lr_newton_step_with_stepsize,
-        compute_std = compute_std,
         fit_1d = fit_1d,
         fit_null = fit_null,
         fit_vmap_jit = fit_vmap_jit,
