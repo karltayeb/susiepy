@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from susiepy.newton_raphson import newton_raphson_generator
-from susiepy.generalized_ibss import ser_generator, gibss_generator
+from susiepy.generalized_ser import ser_generator
+from susiepy.generalized_ibss import gibss_generator
 
 def sigmoid(r):
     return 1 / (1 + jnp.exp(-r))
