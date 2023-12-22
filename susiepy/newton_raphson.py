@@ -108,8 +108,10 @@ def newton_raphson_generator(log_likelihood, coef_initializer):
     # vectorize
     fit_from_init_vmap = jax.vmap(fit_from_init_1d, (0, 1, None, None, None, None, None))
     fit_from_init_vmap_jit = jax.jit(fit_from_init_vmap)
-   
+  
+    
     regression_functions = dict(
+        log_likelihood = log_likelihood,
         ll_grad = ll_grad,
         ll_hess = ll_hess,
         make_state = make_state,
