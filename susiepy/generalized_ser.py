@@ -10,6 +10,7 @@ from jaxopt import LBFGS
 from typing import Callable, Any
 from numpy.typing import NDArray
 from functools import partial
+from numpy.polynomial import hermite
 
 @jax.jit
 def compute_lbf_laplace_mle2(betahat, shat2, ll, ll0, prior_variance):
@@ -41,6 +42,122 @@ def optimize_prior_variance(pi, betahat, shat2, ll, ll0):
     solver = LBFGS(fun=fun_vg, value_and_grad = True)
     opt = solver.run(np.array(0.))
     return jnp.exp(opt.params)
+
+def make_mle_quadrature_rule2(log_likelihood, m=16):
+    # compute quadrature points
+    qx, qw = hermite.hermgauss(m)
+    
+    # vectorize log likelihood, evaluate at multiple coef
+    # args: (coef, x, y, offset, obs_weights, penalty)
+    log_likelihood_vec = jax.vmap(log_likelihood, (0, None, None, None, None, None))
+
+    def logp_quad_mle(x, y, offset, obs_weights, prior_variance, mle_fit):
+        """Compute marginal likelihood using quadrature rule from MLE
+
+        Args:
+            x (_type_): covariate
+            y (_type_): respose
+            offset (_type_): offset in lienar prediction
+            mle_fit (_type_): dictionary with summary of MLE fit
+            tau0 (_type_): prior precision
+
+        Returns:
+            float: M-point quadrature
+        """        
+        
+        # quadrature using mle
+        bhat = mle_fit['betahat']
+        b0 = mle_fit['intercept'] 
+        tau0 = 1/prior_variance
+        tau1 = -mle_fit['hess'][1, 1]
+
+        tau = tau1 + tau0
+        mu = tau1/tau * bhat
+
+        def f(b):
+            # log p(y, b, b0) - log q(b)
+            # for vector of b
+            # q(b) is a chosen so that Hermite quadrature rule works well
+            
+            # make coefficients 
+            coef = jnp.array([jnp.ones(m)*b0, b]).T
+            ll = log_likelihood_vec(coef, x, y, offset, obs_weights, 0.)
+            logpb = 0.5 * jnp.log(tau0 / (2 *jnp.pi)) - 0.5 * tau0 * b**2
+            return jnp.sum(ll) + logpb + 0.5 * tau * (b - mu)**2
+
+        # change of variable for quadrature points
+        qb = jnp.sqrt(2/tau) * qx + mu
+        
+        # compute integral on log scale
+        logI = logsumexp(f(qb) + jnp.log(qw))
+        return 0.5 * jnp.log(2/tau) + logI
+   
+    # extract only the arguments we need
+    extract_quad_data = lambda fits: {k: fits.get(k) for k in ['betahat', 'intercept', 'hess']}
+    
+    # vectorize the quadrature rule over columns of X
+    # x, y, offset, obs_weights, prior_variance, mle_fit
+    _logp_quad_mle_vmap = jax.vmap(
+        logp_quad_mle,(1, None, None, None, None, {'betahat': 0, 'intercept': 0, 'hess': 0}))
+   
+    @jit 
+    def logp_quad_mle_vmap(X, y, offset, obs_weights, fits, prior_variance):
+       fits2 = extract_quad_data(fits)
+       return _logp_quad_mle_vmap(X, y, offset, obs_weights, prior_variance, fits2) 
+    
+    return logp_quad_mle, logp_quad_mle_vmap
+
+def make_mle_quadrature_rule(m=16):
+    # compute quadrature points
+    qx, qw = hermite.hermgauss(m)
+
+    def logp_quad_mle(x, y, offset, obs_weights, prior_variance, mle_fit):
+        """Compute marginal likelihood using quadrature rule from MLE
+
+        Args:
+            x (_type_): covariate
+            y (_type_): respose
+            offset (_type_): offset in lienar prediction
+            mle_fit (_type_): dictionary with summary of MLE fit
+            tau0 (_type_): prior precision
+
+        Returns:
+            float: M-point quadrature
+        """
+        # quadrature using mle
+        bhat = mle_fit['betahat']
+        b0 = mle_fit['intercept']
+        tau1 = -mle_fit['hess'][1, 1]
+
+        tau0 = 1/prior_variance
+        tau = tau1 + tau0
+        mu = tau1/tau * bhat
+
+        def log_joint(b):
+            psi = b * x + b0 + offset
+            psi = jnp.clip(psi, -100, 100) # bound the log-odds
+            ll = y * psi - jnp.log1p(jnp.exp(psi))
+            logpb = 0.5 * jnp.log(tau0 / (2 *jnp.pi)) - 0.5 * tau0 * b**2
+            return jnp.sum(ll * obs_weights) + logpb
+        def f(b):
+            return log_joint(b) + 0.5 * tau * (b - mu)**2
+        fv = jax.vmap(f)
+
+        qb = jnp.sqrt(2/tau) * qx + mu
+        I = logsumexp(fv(qb) + jnp.log(qw))
+        return 0.5 * jnp.log(2/tau) + I
+    
+    extract_quad_data = lambda fits: {k: fits.get(k) for k in ['betahat', 'intercept', 'hess']}
+    _logp_quad_mle_vmap = jax.vmap(
+        logp_quad_mle,(1, None, None, None, None, {'betahat': 0, 'intercept': 0, 'hess': 0}))
+   
+    @jit 
+    def logp_quad_mle_vmap(X, y, offset, obs_weights, fits, prior_variance):
+       fits2 = extract_quad_data(fits)
+       return _logp_quad_mle_vmap(X, y, offset, obs_weights, prior_variance, fits2) 
+    
+    return logp_quad_mle, logp_quad_mle_vmap
+
 
 def ser_generator(regression_functions: dict):
     # unpack regression_function
@@ -184,4 +301,4 @@ def ser_generator(regression_functions: dict):
         res['elapsed_time'] = toc - tic
         return res
     
-    return fit_ser
+    return fit_ser_mle
