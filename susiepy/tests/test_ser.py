@@ -50,6 +50,19 @@ fit = test_gibss()
 fit['prior_variance']
 
 # %%
+from susiepy.generalized_ser import make_mle_quadrature_rule
+from susiepy.logistic_susie import logistic_regression_log_likelihood
+from susiepy.logistic_susie import logistic_regression_functions
+q16, q16v = make_mle_quadrature_rule(16)
+X, y = simulate()
+fit = logistic_ser(X, y)
+lbf_quad = q16v(X, y, np.zeros_like(y), np.ones_like(y), fit, fit['prior_variance']) - fit['ll0']
 
-
+# fit_mle = logistic_regression_functions['fit_1d']
+# x = X[:, 0]
+# # x, y, offset, weights, penalty, maxiter
+# mle = fit_mle(x, y, 0., 1., 0., 10)
+# mle['betahat'] = mle['coef'][1]
+# mle['intercept'] = mle['coef'][0]
+# q16(x, y, 0., 1., 0.3, mle) - mle['ll0']
 # %%
