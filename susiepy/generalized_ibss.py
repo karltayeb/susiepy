@@ -106,6 +106,4 @@ def gibss_generator(fit_ser: Callable):
 
     return generalized_ibss
 
-
-
-        
+ 
